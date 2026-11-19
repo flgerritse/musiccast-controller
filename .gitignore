@@ -1,0 +1,9 @@
+# Build output
+/target/
+/dist/
+
+# Local screenshots
+/shots/
+
+# macOS
+.DS_Store
