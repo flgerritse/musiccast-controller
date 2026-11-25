@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
-pub const SUPPORTED_EXTS: [&str; 11] =
-    ["mp3", "wma", "aac", "ogg", "flac", "alac", "aiff", "wav", "mp4", "ape", "m4a"];
+pub const SUPPORTED_EXTS: [&str; 12] =
+    ["mp3", "wma", "aac", "ogg", "flac", "alac", "aiff", "aif", "wav", "mp4", "ape", "m4a"];
 
 pub fn is_supported(path: &Path) -> bool {
     path.extension()
@@ -25,19 +25,22 @@ pub fn mime_for(path: &Path) -> &'static str {
         "wav" => "audio/wav",
         "flac" => "audio/flac",
         "mp3" => "audio/mpeg",
-        "dsf" => "application/octet-stream",
-        "m4a" => "audio/mp4",
+        "m4a" | "alac" | "mp4" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" => "audio/ogg",
+        "aiff" | "aif" => "audio/aiff",
         "wma" => "audio/x-ms-wma",
-        "m3u8" => "application/x-mpegURL",
-        "ts" => "video/MP2T",
+        "ape" => "audio/x-ape",
         _ => "application/octet-stream",
     }
 }
 
-pub fn local_ip() -> String {
-    // UDP "connect" trick: picks the LAN source address without sending traffic.
+/// The local address the speaker can reach us on: "connect" a UDP socket to the
+/// speaker (no traffic is sent) and read the source address the OS picked. This
+/// stays correct with a VPN or several network interfaces.
+pub fn local_ip_for(target_ip: &str) -> String {
     if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
-        if sock.connect("8.8.8.8:80").is_ok() {
+        if sock.connect((target_ip, 80)).is_ok() {
             if let Ok(addr) = sock.local_addr() {
                 return addr.ip().to_string();
             }
@@ -50,10 +53,8 @@ pub fn url_encode_path(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{:02X}", b)),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
         }
     }
     out
@@ -83,90 +84,92 @@ impl FileServer {
         *self.files.lock().unwrap() = files;
     }
 
-    pub fn url_for(&self, path: &Path) -> String {
+    /// URL `/<index>/<name>`: the index makes equal file names from different
+    /// folders unambiguous; the name is only there for the renderer's display.
+    pub fn url_for(&self, index: usize, path: &Path, speaker_ip: &str) -> String {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-        format!("http://{}:{}/{}", local_ip(), self.port, url_encode_path(name))
+        format!("http://{}:{}/{}/{}", local_ip_for(speaker_ip), self.port, index, url_encode_path(name))
     }
 }
 
 fn serve_loop(server: Server, files: Arc<Mutex<Vec<PathBuf>>>) {
     for request in server.incoming_requests() {
-        let url_path = request.url().split('?').next().unwrap_or("/").to_string();
-        let name = api::percent_decode(url_path.trim_start_matches('/'));
-        let found = files
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|p| p.file_name().and_then(|n| n.to_str()).map(|n| n == name).unwrap_or(false))
-            .cloned();
-        let Some(path) = found else {
-            let _ = request.respond(Response::from_string("not found").with_status_code(StatusCode(404)));
-            continue;
-        };
         if request.method() != &Method::Get && request.method() != &Method::Head {
             let _ = request.respond(Response::from_string("method not allowed").with_status_code(StatusCode(405)));
             continue;
         }
+        let url_path = request.url().split('?').next().unwrap_or("/").to_string();
+        let mut parts = url_path.trim_start_matches('/').splitn(2, '/');
+        let index = parts.next().and_then(|p| p.parse::<usize>().ok());
+        let name = parts.next().map(api::percent_decode).unwrap_or_default();
+        let found = index.and_then(|i| files.lock().unwrap().get(i).cloned()).filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == name)
+        });
+        let Some(path) = found else {
+            let _ = request.respond(Response::from_string("not found").with_status_code(StatusCode(404)));
+            continue;
+        };
         let Ok(mut file) = std::fs::File::open(&path) else {
             let _ = request.respond(Response::from_string("open failed").with_status_code(StatusCode(500)));
             continue;
         };
         let total = file.metadata().map(|m| m.len()).unwrap_or(0);
         let mime = mime_for(&path);
-        let ctype = Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap();
-        let accept = Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap();
-
-        // Single-range support (devices may request chunks).
+        let mut headers = vec![
+            Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).unwrap(),
+            Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
+        ];
         let range = request
             .headers()
             .iter()
             .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("Range"))
             .map(|h| h.value.as_str().to_string());
-        if let Some(range) = range {
-            if let Some((start, end)) = parse_range(&range, total) {
-                let len = end - start + 1;
-                let mut buf = vec![0u8; len as usize];
-                if file.seek(SeekFrom::Start(start)).is_ok() && file.read_exact(&mut buf).is_ok() {
-                    let cr = Header::from_bytes(
-                        &b"Content-Range"[..],
-                        format!("bytes {}-{}/{}", start, end, total).as_bytes(),
-                    )
-                    .unwrap();
-                    let resp = Response::from_data(buf)
-                        .with_status_code(StatusCode(206))
-                        .with_header(ctype)
-                        .with_header(accept)
-                        .with_header(cr);
-                    let _ = request.respond(resp);
+        // Single-range support, streamed from disk (never buffered in memory).
+        let (status, start, len) = match range {
+            Some(r) => match parse_range(&r, total) {
+                Some((start, end)) => {
+                    headers.push(
+                        Header::from_bytes(&b"Content-Range"[..], format!("bytes {start}-{end}/{total}").as_bytes())
+                            .unwrap(),
+                    );
+                    (206, start, end - start + 1)
+                }
+                None => {
+                    let cr = Header::from_bytes(&b"Content-Range"[..], format!("bytes */{total}").as_bytes()).unwrap();
+                    let _ = request.respond(Response::empty(416).with_header(cr));
                     continue;
                 }
-            }
+            },
+            None => (200, 0, total),
+        };
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            let _ = request.respond(Response::from_string("seek failed").with_status_code(StatusCode(500)));
+            continue;
         }
-        let resp = Response::from_file(file)
-            .with_header(ctype)
-            .with_header(accept);
+        let resp = Response::new(StatusCode(status), headers, file.take(len), Some(len as usize), None);
         let _ = request.respond(resp);
     }
 }
 
+/// Parse a single `bytes=` range; None when it is malformed or unsatisfiable.
 fn parse_range(value: &str, total: u64) -> Option<(u64, u64)> {
     let v = value.trim().strip_prefix("bytes=")?;
-    let (a, b) = v.split_once('-')?;
+    let (a, b) = v.split(',').next()?.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
     if total == 0 {
         return None;
     }
     if a.is_empty() {
         // suffix range: last N bytes
         let n: u64 = b.parse().ok()?;
-        let start = total.saturating_sub(n);
-        Some((start, total - 1))
-    } else {
-        let start: u64 = a.parse().ok()?;
-        let end: u64 = if b.is_empty() { total - 1 } else { b.parse().ok()? };
-        if start >= total {
+        if n == 0 {
             return None;
         }
-        Some((start, end.min(total - 1)))
+        Some((total.saturating_sub(n), total - 1))
+    } else {
+        let start: u64 = a.parse().ok()?;
+        let end: u64 = if b.is_empty() { total - 1 } else { b.parse::<u64>().ok()?.min(total - 1) };
+        (start <= end).then_some((start, end))
     }
 }
 
@@ -182,19 +185,24 @@ const AV_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 
 fn soap(ctrl_url: &str, action: &str, args: &str) -> Result<(), String> {
     let body = format!(
-        "<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/' s:encodingStyle='http://schemas.xmlsoap.org/soap/encoding/'><s:Body><u:{} xmlns:u='{}'>{}</u:{}></s:Body></s:Envelope>",
-        action, AV_SERVICE, args, action
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:{action} xmlns:u=\"{AV_SERVICE}\">{args}</u:{action}></s:Body></s:Envelope>"
     );
-    let resp = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(6))
-        .build()
+    let resp = api::agent()
         .post(ctrl_url)
-        .set("Content-Type", "text/xml; charset=utf-8")
-        .set("SOAPACTION", &format!("\"{}#{}\"", AV_SERVICE, action))
+        .timeout(std::time::Duration::from_secs(6))
+        .set("Content-Type", "text/xml; charset=\"utf-8\"")
+        .set("SOAPACTION", &format!("\"{AV_SERVICE}#{action}\""))
         .send_string(&body);
     match resp {
         Ok(_) => Ok(()),
-        Err(ureq::Error::Status(_, _)) => Ok(()), // device answered; a SOAP fault is tolerated
+        Err(ureq::Error::Status(code, r)) => {
+            // Report the UPnP fault instead of pretending it worked.
+            let text = r.into_string().unwrap_or_default();
+            let desc = roxmltree::Document::parse(&text)
+                .ok()
+                .and_then(|d| d.descendants().find(|n| n.has_tag_name("errorDescription")).and_then(|n| n.text().map(String::from)));
+            Err(format!("{action}: HTTP {code}{}", desc.map(|d| format!(" ({d})")).unwrap_or_default()))
+        }
         Err(e) => Err(e.to_string()),
     }
 }
@@ -202,7 +210,7 @@ fn soap(ctrl_url: &str, action: &str, args: &str) -> Result<(), String> {
 /// Push a local file URL to the speaker.
 pub fn dlna_push(ctrl_url: &str, file_url: &str, title: &str, mime: &str) -> Result<(), String> {
     let didl = format!(
-        "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\"><item id=\"fake_id_37\" parentID=\"fake_parentID\" restricted=\"1\"><dc:title>{}</dc:title><upnp:class>object.item.audioItem</upnp:class><res protocolInfo=\"http-get:*:{}:*\">{}</res></item></DIDL-Lite>",
+        "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\"><item id=\"1\" parentID=\"0\" restricted=\"1\"><dc:title>{}</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class><res protocolInfo=\"http-get:*:{}:*\">{}</res></item></DIDL-Lite>",
         xml_escape(title), mime, xml_escape(file_url)
     );
     // The whole DIDL document is XML-escaped inside CurrentURIMetaData.
@@ -213,4 +221,21 @@ pub fn dlna_push(ctrl_url: &str, file_url: &str, title: &str, mime: &str) -> Res
     );
     soap(ctrl_url, "SetAVTransportURI", &args)?;
     soap(ctrl_url, "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranges() {
+        assert_eq!(parse_range("bytes=0-", 1000), Some((0, 999)));
+        assert_eq!(parse_range("bytes=100-199", 1000), Some((100, 199)));
+        assert_eq!(parse_range("bytes=-100", 1000), Some((900, 999)));
+        assert_eq!(parse_range("bytes=900-5000", 1000), Some((900, 999)));
+        assert_eq!(parse_range("bytes=500-100", 1000), None);
+        assert_eq!(parse_range("bytes=1000-", 1000), None);
+        assert_eq!(parse_range("bytes=-0", 1000), None);
+        assert_eq!(parse_range("bytes=x-1", 1000), None);
+    }
 }
