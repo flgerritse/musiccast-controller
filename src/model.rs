@@ -301,6 +301,18 @@ pub fn input_display_name(id: &str) -> String {
 #[derive(Clone, Debug, Default)]
 pub struct ListEntry {
     pub text: String,
+    /// Attribute bit field: b0 = can be selected (opens a sub-list),
+    /// b1 = can be played. 0 means the device did not say.
+    pub attribute: i64,
+}
+
+impl ListEntry {
+    pub fn can_select(&self) -> bool {
+        self.attribute == 0 || self.attribute & 0b01 != 0
+    }
+    pub fn can_play(&self) -> bool {
+        self.attribute == 0 || self.attribute & 0b10 != 0
+    }
 }
 
 /// Play-history record, kept in a JSON store.

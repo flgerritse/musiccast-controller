@@ -434,7 +434,7 @@ pub fn parse_list(v: &Value) -> ListPage {
     let entries = v
         .get("list_info")
         .and_then(|x| x.as_array())
-        .map(|a| a.iter().map(|item| ListEntry { text: s(item, "text") }).collect())
+        .map(|a| a.iter().map(|item| ListEntry { text: s(item, "text"), attribute: i(item, "attribute") }).collect())
         .unwrap_or_default();
     ListPage {
         entries,

@@ -1008,9 +1008,12 @@ impl Worker {
     fn browse_control(&mut self, kind: &str, index: i64) {
         let Some(dev) = self.sel().cloned() else { return };
         let zone = dev.zone_or_main().to_string();
+        // zone is only valid for type=play; sending it with select/return
+        // makes some devices answer "invalid parameter".
         let url = match kind {
-            "return" => format!("/netusb/setListControl?list_id=main&type=return&zone={zone}"),
-            _ => format!("/netusb/setListControl?list_id=main&type={kind}&index={index}&zone={zone}"),
+            "return" => "/netusb/setListControl?list_id=main&type=return".to_string(),
+            "play" => format!("/netusb/setListControl?list_id=main&type=play&index={index}&zone={zone}"),
+            _ => format!("/netusb/setListControl?list_id=main&type={kind}&index={index}"),
         };
         if let Err(e) = api::command(&dev, &url) {
             self.tx.send(Event::BrowseError(format!("{} ({e})", self.t("Command failed", "Opdracht mislukt"))));

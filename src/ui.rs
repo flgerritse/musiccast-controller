@@ -1604,16 +1604,25 @@ fn browse_window(ctx: &egui::Context, shared: &SharedArc, lang: Language) {
             for (i, entry) in entries.iter().enumerate() {
                 let index = base + i as i64;
                 ui.horizontal(|ui| {
+                    let (can_select, can_play) = (entry.can_select(), entry.can_play());
                     let play = ui
-                        .add_enabled(!loading, egui::Button::new("▶").small())
+                        .add_enabled(!loading && can_play, egui::Button::new("▶").small())
                         .on_hover_text(lang.text("Play", "Afspelen"));
-                    let row = egui::Button::new(entry.text.as_str())
+                    let mut row = egui::Button::new(entry.text.as_str())
                         .frame_when_inactive(false)
                         .truncate()
-                        .min_size(Vec2::new(ui.available_width(), 0.0))
-                        .right_text("›");
-                    if ui.add_enabled(!loading, row).on_hover_text(lang.text("Open", "Openen")).clicked() {
-                        start_loading(shared, Job::BrowseSelect(index));
+                        .min_size(Vec2::new(ui.available_width(), 0.0));
+                    if can_select {
+                        row = row.right_text("›");
+                    }
+                    let hover = if can_select { lang.text("Open", "Openen") } else { lang.text("Play", "Afspelen") };
+                    if ui.add_enabled(!loading, row).on_hover_text(hover).clicked() {
+                        // A station or track cannot be "selected", only played.
+                        if can_select {
+                            start_loading(shared, Job::BrowseSelect(index));
+                        } else if can_play {
+                            send(shared, Job::BrowsePlay(index));
+                        }
                     }
                     if play.clicked() {
                         send(shared, Job::BrowsePlay(index));
