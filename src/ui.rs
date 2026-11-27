@@ -1608,13 +1608,12 @@ fn browse_window(ctx: &egui::Context, shared: &SharedArc, lang: Language) {
                     let play = ui
                         .add_enabled(!loading && can_play, egui::Button::new("▶").small())
                         .on_hover_text(lang.text("Play", "Afspelen"));
-                    let mut row = egui::Button::new(entry.text.as_str())
+                    // right_text also keeps the label left-aligned, so always set it.
+                    let row = egui::Button::new(entry.text.as_str())
                         .frame_when_inactive(false)
                         .truncate()
-                        .min_size(Vec2::new(ui.available_width(), 0.0));
-                    if can_select {
-                        row = row.right_text("›");
-                    }
+                        .min_size(Vec2::new(ui.available_width(), 0.0))
+                        .right_text(if can_select { "›" } else { "" });
                     let hover = if can_select { lang.text("Open", "Openen") } else { lang.text("Play", "Afspelen") };
                     if ui.add_enabled(!loading, row).on_hover_text(hover).clicked() {
                         // A station or track cannot be "selected", only played.

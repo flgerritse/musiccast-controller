@@ -301,17 +301,20 @@ pub fn input_display_name(id: &str) -> String {
 #[derive(Clone, Debug, Default)]
 pub struct ListEntry {
     pub text: String,
-    /// Attribute bit field: b0 = can be selected (opens a sub-list),
-    /// b1 = can be played. 0 means the device did not say.
+    /// YXC attribute bit field: b1 (0x2) = capable of select (opens a
+    /// sub-list), b2 (0x4) = capable of play. 0 means the device did not say.
     pub attribute: i64,
 }
 
 impl ListEntry {
+    const SELECT: i64 = 1 << 1;
+    const PLAY: i64 = 1 << 2;
+
     pub fn can_select(&self) -> bool {
-        self.attribute == 0 || self.attribute & 0b01 != 0
+        self.attribute == 0 || self.attribute & Self::SELECT != 0
     }
     pub fn can_play(&self) -> bool {
-        self.attribute == 0 || self.attribute & 0b10 != 0
+        self.attribute == 0 || self.attribute & Self::PLAY != 0
     }
 }
 
@@ -470,6 +473,17 @@ pub fn now_string() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_entry_attribute_bits() {
+        let e = |attribute| ListEntry { text: String::new(), attribute };
+        // Folder such as "Radio": select only.
+        assert!(e(0x2).can_select() && !e(0x2).can_play());
+        // Station: play only.
+        assert!(!e(0x4).can_select() && e(0x4).can_play());
+        // Unknown: allow both.
+        assert!(e(0).can_select() && e(0).can_play());
+    }
 
     #[test]
     fn step_rounds_to_nearest() {

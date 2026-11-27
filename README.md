@@ -61,6 +61,18 @@ Extra command-line options:
 
 Run the unit tests with `cargo test`.
 
+### macOS disk image
+
+```sh
+./make_mac_dmg.sh            # → dist/Controller-for-MusicCast-<version>.dmg
+./make_mac_dmg.sh --clean    # same, then `cargo clean`
+```
+
+The script builds a release binary, wraps it in an ad-hoc signed `.app` with
+the icon from `assets/app-icon.png`, and packs it with an Applications shortcut.
+The version comes from `Cargo.toml`. Because the app has no Developer ID
+signature, the first launch on another Mac needs right-click → Open.
+
 The app is developed and tested on macOS. Because it is built on eframe,
 it should also build on Linux and Windows, but that hasn't been tested.
 

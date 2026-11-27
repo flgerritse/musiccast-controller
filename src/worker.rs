@@ -1015,7 +1015,18 @@ impl Worker {
             "play" => format!("/netusb/setListControl?list_id=main&type=play&index={index}&zone={zone}"),
             _ => format!("/netusb/setListControl?list_id=main&type={kind}&index={index}"),
         };
-        if let Err(e) = api::command(&dev, &url) {
+        let mut result = api::command(&dev, &url);
+        let mut kind = kind;
+        if result.is_err() && kind == "select" {
+            // Some items report themselves as folders but can only be
+            // played (or the other way round); try playing before giving up.
+            let play = format!("/netusb/setListControl?list_id=main&type=play&index={index}&zone={zone}");
+            if api::command(&dev, &play).is_ok() {
+                result = Ok(());
+                kind = "play";
+            }
+        }
+        if let Err(e) = result {
             self.tx.send(Event::BrowseError(format!("{} ({e})", self.t("Command failed", "Opdracht mislukt"))));
             return;
         }
